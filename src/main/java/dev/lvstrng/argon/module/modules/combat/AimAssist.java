@@ -16,6 +16,7 @@ import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.item.AxeItem;
 import net.minecraft.item.SwordItem;
 import net.minecraft.util.hit.EntityHitResult;
+import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 import org.lwjgl.glfw.GLFW;
@@ -171,4 +172,25 @@ public final class AimAssist extends Module implements HudListener, MouseMoveLis
         if (onlyWeapon.getValue() && !isHoldingWeapon()) return false;
         if (onLeftClick.getValue() && !isLeftClicking()) return false;
         if (attackCooldown.getValue() && mc.player.getAttackCooldownProgress(0.0f) < 1.0f) return false;
-        if (isMovingMouse && !mouseMoveTimer.delay(waitFor
+        if (isMovingMouse && !mouseMoveTimer.delay(waitFor.getValueFloat())) return false;
+        return true;
+    }
+
+    private boolean isHoldingWeapon() {
+        return mc.player.getMainHandStack().getItem() instanceof SwordItem || mc.player.getMainHandStack().getItem() instanceof AxeItem;
+    }
+
+    private boolean isLeftClicking() {
+        return GLFW.glfwGetMouseButton(mc.getWindow().getHandle(), GLFW.GLFW_MOUSE_BUTTON_LEFT) == GLFW.GLFW_PRESS;
+    }
+
+    private PlayerEntity findBestTarget() {
+        PlayerEntity bestTarget = null;
+        double bestScore = Double.MAX_VALUE;
+
+        for (PlayerEntity player : mc.world.getPlayers()) {
+            if (player == mc.player || player.isDead() || !player.isAlive()) continue;
+            if (player.distanceTo(mc.player) > radius.getValue()) continue;
+            if (seeOnly.getValue() && !mc.player.canSee(player)) continue;
+
+            Rotation rotation = RotationUtils.getDirection(mc.player, get
