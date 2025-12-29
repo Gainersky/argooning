@@ -8,8 +8,9 @@ import dev.lvstrng.argon.module.setting.BooleanSetting;
 import dev.lvstrng.argon.module.setting.MinMaxSetting;
 import dev.lvstrng.argon.module.setting.ModeSetting;
 import dev.lvstrng.argon.module.setting.NumberSetting;
-import dev.lvstrng.argon.utils.*;
+import dev.lvstrng.argon.utils.TimerUtils;
 import dev.lvstrng.argon.utils.rotation.Rotation;
+import dev.lvstrng.argon.utils.*;
 import net.minecraft.client.render.RenderTickCounter;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.item.AxeItem;
@@ -20,208 +21,154 @@ import net.minecraft.util.math.Vec3d;
 import org.lwjgl.glfw.GLFW;
 
 public final class AimAssist extends Module implements HudListener, MouseMoveListener {
-	private final BooleanSetting stickyAim = new BooleanSetting(EncryptedString.of("Sticky Aim"), false)
-			.setDescription(EncryptedString.of("Aims at the last attacked player"));
 
-	private final BooleanSetting onlyWeapon = new BooleanSetting(EncryptedString.of("Only Weapon"), true);
+    // Targeting Settings
+    private final ModeSetting<AimMode> aimAt = new ModeSetting<>("Aim At", AimMode.Head, AimMode.class);
+    private final NumberSetting fov = new NumberSetting("FOV", 5, 360, 90, 1);
+    private final NumberSetting radius = new NumberSetting("Radius", 0.1, 6, 4.5, 0.1);
+    private final BooleanSetting seeOnly = new BooleanSetting("See Only", true);
+    private final BooleanSetting stickyAim = new BooleanSetting("Sticky Aim", true)
+            .setDescription("Aims at the last attacked player");
+    private final NumberSetting targetSwitchDelay = new NumberSetting("Target Switch Delay", 0, 1000, 200, 50)
+            .setDescription("Delay in milliseconds before switching to a new, higher-priority target");
 
-	private final BooleanSetting onLeftClick = new BooleanSetting(EncryptedString.of("On Left Click"), false)
-			.setDescription(EncryptedString.of("Only gets triggered if holding down left click"));
-	private final ModeSetting<AimMode> aimAt = new ModeSetting<>(EncryptedString.of("Aim At"), AimMode.Head, AimMode.class);
+    // Activation Conditions
+    private final BooleanSetting onlyWeapon = new BooleanSetting("Only Weapon", true);
+    private final BooleanSetting onLeftClick = new BooleanSetting("On Left Click", false)
+            .setDescription("Only gets triggered if holding down left click");
+    private final BooleanSetting attackCooldown = new BooleanSetting("Attack Cooldown", true)
+            .setDescription("Only assist when the player's attack cooldown is over");
 
-	private final BooleanSetting stopAtTargetVertical = new BooleanSetting(EncryptedString.of("Stop at Target Vert"), true)
-			.setDescription(EncryptedString.of("Stops vertically assisting if already aiming at the entity, helps bypass anti-cheat"));
+    // Speed & Smoothing
+    private final MinMaxSetting horizontalSpeed = new MinMaxSetting("Horizontal Speed", 0, 10, 0.1, 1.5, 4);
+    private final MinMaxSetting verticalSpeed = new MinMaxSetting("Vertical Speed", 0, 10, 0.1, 1.5, 4);
+    private final NumberSetting speedChange = new NumberSetting("Speed Randomization", 0, 1000, 350, 1)
+            .setDescription("Time in milliseconds to wait before randomizing speed again");
+    private final ModeSetting<LerpMode> lerpMode = new ModeSetting<>("Lerp", LerpMode.Normal, LerpMode.class)
+            .setDescription("The smoothing function to use for aiming");
 
-	private final BooleanSetting stopAtTargetHorizontal = new BooleanSetting(EncryptedString.of("Stop at Target Horiz"), false)
-			.setDescription(EncryptedString.of("Stops horizontally assisting if already aiming at the entity, helps bypass anti-cheat"));
+    // Humanization
+    private final NumberSetting randomization = new NumberSetting("Chance", 0, 100, 85, 1)
+            .setDescription("The chance for the aim assist to update on any given frame");
+    private final NumberSetting waitFor = new NumberSetting("Wait on Move", 0, 1000, 150, 1)
+            .setDescription("After you move your mouse, aim assist will stop working for this amount of time");
+    private final BooleanSetting smoothReset = new BooleanSetting("Smooth Reset", true)
+            .setDescription("Gradually returns to a normal speed when not aiming at a target");
+    private final NumberSetting breakTime = new NumberSetting("Break Time", 0, 5000, 0, 100)
+            .setDescription("Randomly stops assisting for a short duration to seem more human");
 
-	private final NumberSetting radius = new NumberSetting(EncryptedString.of("Radius"), 0.1, 6, 5, 0.1);
+    // Precision
+    private final BooleanSetting horizontalAssist = new BooleanSetting("Horizontal", true);
+    private final BooleanSetting verticalAssist = new BooleanSetting("Vertical", true);
+    private final BooleanSetting stopAtTargetHorizontal = new BooleanSetting("Stop at Target Horiz", true)
+            .setDescription("Stops horizontal assistance if already aiming at the entity");
+    private final BooleanSetting stopAtTargetVertical = new BooleanSetting("Stop at Target Vert", true)
+            .setDescription("Stops vertical assistance if already aiming at the entity");
 
-	private final BooleanSetting seeOnly = new BooleanSetting(EncryptedString.of("See Only"), true);
-	private final BooleanSetting lookAtNearest = new BooleanSetting(EncryptedString.of("Look at Nearest"), false);
+    // Timers and State
+    private final TimerUtils speedRandomizationTimer = new TimerUtils();
+    private final TimerUtils mouseMoveTimer = new TimerUtils();
+    private final TimerUtils targetSwitchTimer = new TimerUtils();
+    private final TimerUtils breakTimer = new TimerUtils();
+    private final TimerUtils breakDurationTimer = new TimerUtils();
 
-	private final NumberSetting fov = new NumberSetting(EncryptedString.of("FOV"), 5, 360, 180, 1);
+    private boolean isMovingMouse;
+    private float currentHorizontalSpeed, currentVerticalSpeed;
+    private PlayerEntity currentTarget;
+    private long lastBreakTime;
 
-	private final MinMaxSetting pitchSpeed = new MinMaxSetting(EncryptedString.of("Vertical Speed"), 0, 10, 0.1, 2, 4);
-	private final MinMaxSetting yawSpeed = new MinMaxSetting(EncryptedString.of("Horizontal Speed"), 0, 10, 0.1, 2, 4);
+    public enum AimMode { Head, Chest, Legs }
+    public enum LerpMode { Normal, Smoothstep, EaseOut, Sine }
 
-	private final NumberSetting speedChange = new NumberSetting(EncryptedString.of("Speed Delay"), 0, 1000, 250, 1)
-			.setDescription(EncryptedString.of("Time in milliseconds to wait after resetting random speed"));
+    public AimAssist() {
+        super("Aim Assist", "Automatically aims at players for you", -1, Category.COMBAT);
+        addSettings(
+                // Targeting
+                aimAt, fov, radius, seeOnly, stickyAim, targetSwitchDelay,
+                // Activation
+                onlyWeapon, onLeftClick, attackCooldown,
+                // Speed & Smoothing
+                horizontalSpeed, verticalSpeed, speedChange, lerpMode,
+                // Humanization
+                randomization, waitFor, smoothReset, breakTime,
+                // Precision
+                horizontalAssist, verticalAssist, stopAtTargetHorizontal, stopAtTargetVertical
+        );
+    }
 
-	private final NumberSetting randomization = new NumberSetting(EncryptedString.of("Chance"), 0, 100, 50, 1);
+    @Override
+    public void onEnable() {
+        eventManager.add(HudListener.class, this);
+        eventManager.add(MouseMoveListener.class, this);
+        resetState();
+    }
 
-	private final BooleanSetting yawAssist = new BooleanSetting(EncryptedString.of("Horizontal"), true);
-	private final BooleanSetting pitchAssist = new BooleanSetting(EncryptedString.of("Vertical"), true);
+    @Override
+    public void onDisable() {
+        eventManager.remove(HudListener.class, this);
+        eventManager.remove(MouseMoveListener.class, this);
+        resetState();
+    }
 
-	private final NumberSetting waitFor = new NumberSetting(EncryptedString.of("Wait on Move"), 0, 1000, 0, 1)
-			.setDescription(EncryptedString.of("After you move your mouse aim assist will stop working for the selected amount of time"));
+    private void resetState() {
+        currentTarget = null;
+        isMovingMouse = false;
+        currentHorizontalSpeed = horizontalSpeed.getRandomValueFloat();
+        currentVerticalSpeed = verticalSpeed.getRandomValueFloat();
+        speedRandomizationTimer.reset();
+        mouseMoveTimer.reset();
+        targetSwitchTimer.reset();
+        breakTimer.reset();
+        breakDurationTimer.reset();
+    }
 
-	private final ModeSetting<LerpMode> lerp = new ModeSetting<>(EncryptedString.of("Lerp"), LerpMode.Normal, LerpMode.class)
-			.setDescription(EncryptedString.of("Linear interpolation to use to rotate"));
+    @Override
+    public void onMouseMove(MouseMoveEvent event) {
+        isMovingMouse = true;
+        mouseMoveTimer.reset();
+    }
 
-	private final ModeSetting<PosMode> posMode = new ModeSetting<>(EncryptedString.of("Pos mode"), PosMode.Normal, PosMode.class)
-			.setDescription(EncryptedString.of("Precision of the target position"));
+    @Override
+    public void onRenderHud(HudEvent event) {
+        if (!shouldRun()) return;
 
-	private final TimerUtils timer = new TimerUtils();
-	private final TimerUtils resetSpeed = new TimerUtils();
-	private boolean move;
-	private float pitch, yaw;
+        // Find a target if we don't have one or if it's time to reconsider
+        if (currentTarget == null || shouldFindNewTarget()) {
+            currentTarget = findBestTarget();
+            if (currentTarget != null) {
+                targetSwitchTimer.reset();
+            }
+        }
 
-	@SuppressWarnings("unused")
-	public enum PosMode {
-		Normal, Lerped
-	}
+        if (currentTarget == null) {
+            if (smoothReset.getValue()) {
+                // Gradually decrease speed when no target
+                currentHorizontalSpeed *= 0.95f;
+                currentVerticalSpeed *= 0.95f;
+            }
+            return;
+        }
 
-	public enum AimMode {
-		Head, Chest, Legs
-	}
+        // Handle break time logic
+        if (handleBreakTime()) return;
 
-	public enum LerpMode {
-		Normal, Smoothstep, EaseOut
-	}
+        // Randomize speed periodically
+        if (speedRandomizationTimer.delay(speedChange.getValueFloat())) {
+            currentHorizontalSpeed = horizontalSpeed.getRandomValueFloat();
+            currentVerticalSpeed = verticalSpeed.getRandomValueFloat();
+            speedRandomizationTimer.reset();
+        }
 
-	public AimAssist() {
-		super(EncryptedString.of("Aim Assist"),
-				EncryptedString.of("Automatically aims at players for you"),
-				-1,
-				Category.COMBAT);
+        // Calculate rotations and apply assistance
+        Vec3d targetPos = getTargetPos(currentTarget);
+        Rotation targetRotation = RotationUtils.getDirection(mc.player, targetPos);
 
-		addSettings(stickyAim, onlyWeapon, onLeftClick, aimAt, stopAtTargetVertical, stopAtTargetHorizontal, radius, seeOnly, lookAtNearest, fov, pitchSpeed, yawSpeed, speedChange, randomization, yawAssist, pitchAssist, waitFor, lerp, posMode);
-	}
+        applyAimAssist(targetRotation);
+    }
 
-	@Override
-	public void onEnable() {
-		move = true;
-		pitch = pitchSpeed.getRandomValueFloat();
-		yaw = yawSpeed.getRandomValueFloat();
-
-		eventManager.add(HudListener.class, this);
-		eventManager.add(MouseMoveListener.class, this);
-
-		timer.reset();
-		super.onEnable();
-	}
-
-	@Override
-	public void onDisable() {
-		eventManager.remove(HudListener.class, this);
-		eventManager.remove(MouseMoveListener.class, this);
-		super.onDisable();
-	}
-
-	@Override
-	public void onRenderHud(HudEvent event) {
-		if (timer.delay(waitFor.getValueFloat()) && !move) {
-			move = true;
-			timer.reset();
-		}
-
-		if (mc.player == null || mc.currentScreen != null)
-			return;
-
-		if (onlyWeapon.getValue() && !(mc.player.getMainHandStack().getItem() instanceof SwordItem || mc.player.getMainHandStack().getItem() instanceof AxeItem))
-			return;
-
-		if (onLeftClick.getValue() && GLFW.glfwGetMouseButton(mc.getWindow().getHandle(), GLFW.GLFW_MOUSE_BUTTON_LEFT) != GLFW.GLFW_PRESS)
-			return;
-
-		PlayerEntity target = WorldUtils.findNearestPlayer(mc.player, radius.getValueFloat(), seeOnly.getValue(), true);
-		if (stickyAim.getValue() && mc.player.getAttacking() instanceof PlayerEntity player && player.distanceTo(mc.player) < radius.getValue())
-			target = player;
-
-		if (target == null)
-			return;
-
-		if(resetSpeed.delay(speedChange.getValueFloat())) {
-			pitch = pitchSpeed.getRandomValueFloat();
-			yaw = yawSpeed.getRandomValueFloat();
-			resetSpeed.reset();
-		}
-
-		Vec3d targetPos = posMode.isMode(PosMode.Normal) ? target.getPos() : target.getLerpedPos(RenderTickCounter.ONE.getTickDelta(true));
-
-		if (aimAt.isMode(AimMode.Chest))
-			targetPos = targetPos.add(0, -0.5, 0);
-		else if (aimAt.isMode(AimMode.Legs))
-			targetPos = targetPos.add(0, -1.2, 0);
-
-		if (lookAtNearest.getValue()) {
-			double offsetX = mc.player.getX() - target.getX() > 0 ? 0.29 : -0.29;
-			double offsetZ = mc.player.getZ() - target.getZ() > 0 ? 0.29 : -0.29;
-			targetPos = targetPos.add(offsetX, 0, offsetZ);
-		}
-
-		Rotation rotation = RotationUtils.getDirection(mc.player, targetPos);
-
-		double angleToRotation = RotationUtils.getAngleToRotation(rotation);
-		if (angleToRotation > (double) fov.getValueInt() / 2)
-			return;
-
-		float yawStrength = yaw / 50;
-		float pitchStrength = pitch / 50;
-
-		float yaw = mc.player.getYaw();
-		float pitch = mc.player.getPitch();
-
-		if (lerp.isMode(LerpMode.Smoothstep)) {
-			yaw = (float) smoothStepLerp(yawStrength, mc.player.getYaw(), (float) rotation.yaw());
-			pitch = (float) smoothStepLerp(pitchStrength, mc.player.getPitch(), (float) rotation.pitch());
-		}
-
-		if (lerp.isMode(LerpMode.Normal)) {
-			yaw = lerp(yawStrength, mc.player.getYaw(), (float) (rotation.yaw()));
-			pitch = lerp(pitchStrength, mc.player.getPitch(), (float) (rotation.pitch()));
-		}
-
-		if (lerp.isMode(LerpMode.EaseOut)) {
-			yaw = (float) easeOutBackDegrees(mc.player.getYaw(), rotation.yaw(), yawStrength * RenderTickCounter.ONE.getLastFrameDuration());
-			pitch = (float) easeOutBackDegrees(mc.player.getPitch(), rotation.pitch(), pitchStrength * RenderTickCounter.ONE.getLastFrameDuration());
-		}
-
-		if (MathUtils.randomInt(1, 100) <= randomization.getValueInt()) {
-			if (move) {
-				if (yawAssist.getValue()) {
-					if(stopAtTargetHorizontal.getValue() && WorldUtils.getHitResult(radius.getValue()) instanceof EntityHitResult hitResult && hitResult.getEntity() == target)
-						return;
-
-					mc.player.setYaw(yaw);
-				}
-
-				if (pitchAssist.getValue()) {
-					if(stopAtTargetVertical.getValue() && WorldUtils.getHitResult(radius.getValue()) instanceof EntityHitResult hitResult && hitResult.getEntity() == target)
-						return;
-
-					mc.player.setPitch(pitch);
-				}
-			}
-		}
-	}
-
-	public float lerp(float delta, float start, float end) {
-		return start + (MathHelper.wrapDegrees(end - start) * delta);
-	}
-
-	public static double easeOutBackDegrees(double start, double end, float speed) {
-		double c1 = 1.70158;
-		double c3 = 2.70158;
-		double x = 1 - Math.pow(1 - (double) speed, 3);
-
-		return start + MathHelper.wrapDegrees(end - start) * (1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2));
-	}
-
-	public double smoothStepLerp(double delta, double start, double end) {
-		double value;
-		delta = Math.max(0, Math.min(1, delta));
-
-		double t = delta * delta * (3 - 2 * delta);
-
-		value = start + MathHelper.wrapDegrees(end - start) * t;
-		return value;
-	}
-
-	@Override
-	public void onMouseMove(MouseMoveEvent event) {
-		move = false;
-		timer.reset();
-	}
-}
+    private boolean shouldRun() {
+        if (mc.player == null || mc.currentScreen != null) return false;
+        if (onlyWeapon.getValue() && !isHoldingWeapon()) return false;
+        if (onLeftClick.getValue() && !isLeftClicking()) return false;
+        if (attackCooldown.getValue() && mc.player.getAttackCooldownProgress(0.0f) < 1.0f) return false;
+        if (isMovingMouse && !mouseMoveTimer.delay(waitFor
